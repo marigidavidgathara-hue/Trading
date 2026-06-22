@@ -29,7 +29,6 @@ import pandas as pd
 from sklearn.linear_model import LogisticRegression
 from sklearn.preprocessing import StandardScaler
 from sklearn.isotonic import IsotonicRegression
-from sklearn.model_selection import train_test_split
 from sklearn.metrics import brier_score_loss, log_loss, accuracy_score
 
 try:

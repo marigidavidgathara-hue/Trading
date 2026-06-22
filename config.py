@@ -27,12 +27,22 @@ class DataSourceMode(str, Enum):
     SCREEN = "screen"
 
 
-# Bar size used to build features/labels for each horizon.
-# ccxt/yfinance timeframe strings.
+# Bar size used to build features/labels for each (market, horizon) pair.
+# yfinance only retains 1-minute history for 7 calendar days, and
+# forex/stocks/futures don't trade densely enough in that window to fill a
+# walk-forward fold at 1m (forex's free Yahoo feed is comparatively sparse;
+# stocks/futures only trade ~6.5h/day, 5 days/week). Crypto via ccxt has
+# deep continuous 1m history from the exchange itself, so it stays at 1m.
 HORIZON_TIMEFRAMES = {
-    Horizon.SCALP: "1m",
-    Horizon.SWING: "1d",
+    MarketType.CRYPTO: {Horizon.SCALP: "1m", Horizon.SWING: "1d"},
+    MarketType.FOREX: {Horizon.SCALP: "5m", Horizon.SWING: "1d"},
+    MarketType.STOCK: {Horizon.SCALP: "5m", Horizon.SWING: "1d"},
+    MarketType.FUTURES: {Horizon.SCALP: "5m", Horizon.SWING: "1d"},
 }
+
+
+def get_timeframe(market: "MarketType", horizon: "Horizon") -> str:
+    return HORIZON_TIMEFRAMES[MarketType(market)][Horizon(horizon)]
 
 # How many bars ahead the label looks when building the target
 # (e.g. scalp -> direction of close 3 bars from now; swing -> next day's close)

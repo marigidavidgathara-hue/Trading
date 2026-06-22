@@ -29,8 +29,8 @@ from datetime import datetime, timezone
 import pandas as pd
 
 from config import (
-    MarketType, Horizon, DataSourceMode,
-    HORIZON_TIMEFRAMES, HORIZON_LABEL_LOOKAHEAD,
+    MarketType, Horizon,
+    get_timeframe, HORIZON_LABEL_LOOKAHEAD,
     DEFAULT_SYMBOLS, PREDICTIONS_LOG_PATH,
 )
 from data_feed import get_feed
@@ -54,7 +54,7 @@ HISTORY_LIMIT = {
 
 def _fetch(market: MarketType, symbol: str, horizon: Horizon, source: str) -> pd.DataFrame:
     feed = get_feed(market, source)
-    timeframe = HORIZON_TIMEFRAMES[horizon]
+    timeframe = get_timeframe(market, horizon)
     return feed.get_ohlcv(symbol, timeframe, limit=HISTORY_LIMIT[horizon])
 
 
@@ -81,6 +81,7 @@ def cmd_backtest(args):
         "\nReminder: this is in-sample-of-history performance with a simple cost "
         "model. It does not guarantee live results. Not financial advice."
     )
+    return report
 
 
 def cmd_train(args):
@@ -96,11 +97,12 @@ def cmd_train(args):
     print(f"Trained on {len(X)} bars. In-sample sanity metrics: {metrics}")
     print(f"Saved model to {path}")
     print("Run `backtest` (out-of-sample, walk-forward) before trusting this for live predictions.")
+    return model, metrics, path
 
 
 def cmd_predict(args):
     feed = get_feed(args.market, args.source)
-    timeframe = HORIZON_TIMEFRAMES[args.horizon]
+    timeframe = get_timeframe(args.market, args.horizon)
     has_volume = args.source == "api"
 
     df = feed.get_ohlcv(args.symbol, timeframe, limit=200)
@@ -140,7 +142,7 @@ def _log_prediction(symbol, horizon, source, price, direction, confidence, probs
 def cmd_live(args):
     model = DirectionModel.load(args.symbol, args.horizon)
     feed = get_feed(args.market, args.source)
-    timeframe = HORIZON_TIMEFRAMES[args.horizon]
+    timeframe = get_timeframe(args.market, args.horizon)
     has_volume = args.source == "api"
 
     print(f"Live predictions for {args.symbol} every {args.poll_seconds}s. Ctrl+C to stop.")
@@ -171,9 +173,9 @@ def build_parser():
     sub = p.add_subparsers(dest="cmd", required=True)
 
     def add_common(sp):
-        sp.add_argument("--market", type=MarketType, choices=list(MarketType), required=True)
+        sp.add_argument("--market", type=str, choices=[m.value for m in MarketType], required=True)
         sp.add_argument("--symbol", type=str, default=None, help="Defaults to config.DEFAULT_SYMBOLS[market]")
-        sp.add_argument("--horizon", type=Horizon, choices=list(Horizon), required=True)
+        sp.add_argument("--horizon", type=str, choices=[h.value for h in Horizon], required=True)
         sp.add_argument("--source", type=str, choices=["api", "screen"], default="api")
 
     bt = sub.add_parser("backtest")
@@ -201,6 +203,8 @@ def build_parser():
 def main():
     parser = build_parser()
     args = parser.parse_args()
+    args.market = MarketType(args.market)
+    args.horizon = Horizon(args.horizon)
     if args.symbol is None:
         args.symbol = DEFAULT_SYMBOLS[args.market]
     args.func(args)

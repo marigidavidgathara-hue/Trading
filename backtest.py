@@ -28,24 +28,18 @@ from model import DirectionModel, CLASSES
 from config import Horizon
 
 
-def walk_forward_predictions(
-    df: pd.DataFrame,
+def _walk_forward_core(
+    feats: pd.DataFrame,
+    labels: pd.Series,
     horizon: Horizon,
-    lookahead: int,
     train_window: int,
     test_window: int,
-    has_volume: bool = True,
 ) -> pd.DataFrame:
     """Slides a fixed-size training window forward in `test_window`-sized
     steps, refitting each time, and predicts on the immediately-following
     untouched slice. Returns one row per out-of-sample bar with the
     calibrated probabilities, the model's pick, and the realized label.
     """
-    feats = build_features(df, has_volume=has_volume)
-    labels = build_labels(df, lookahead).reindex(feats.index)
-    valid = labels.notna()
-    feats, labels = feats[valid], labels[valid].astype(int)
-
     rows = []
     start = 0
     n = len(feats)
@@ -70,6 +64,65 @@ def walk_forward_predictions(
             "reduce train_window/test_window or fetch more history."
         )
     return pd.concat(rows)
+
+
+# Floor below which a walk-forward fold isn't meaningful -- also the
+# minimum resolve_windows will shrink down to when there isn't enough
+# history at the configured defaults.
+MIN_WINDOW = {
+    Horizon.SCALP: dict(train_window=300, test_window=50),
+    Horizon.SWING: dict(train_window=100, test_window=20),
+}
+
+
+def resolve_windows(n_available: int, horizon: Horizon, requested: dict) -> dict:
+    """If the requested (default) window sizes don't fit the data actually
+    available, shrink them proportionally down to MIN_WINDOW's floor
+    instead of failing outright. This is what's needed when, e.g., a
+    yfinance-backed market returns far fewer bars than crypto's much
+    deeper history -- same model/backtest code, smaller windows.
+    """
+    train_window, test_window = requested["train_window"], requested["test_window"]
+    if n_available >= train_window + test_window:
+        return {"train_window": train_window, "test_window": test_window}
+
+    floor = MIN_WINDOW[horizon]
+    scale = n_available / (train_window + test_window)
+    new_train = max(floor["train_window"], int(train_window * scale * 0.9))
+    new_test = max(floor["test_window"], int(test_window * scale * 0.9))
+
+    if new_train + new_test > n_available:
+        raise ValueError(
+            f"Only {n_available} usable bars available after feature warm-up -- "
+            f"too few for even a minimal walk-forward fold (need at least "
+            f"{floor['train_window'] + floor['test_window']}). Fetch more "
+            f"history, use a coarser timeframe, or backtest a different symbol."
+        )
+    print(
+        f"Note: only {n_available} usable bars available -- shrinking walk-forward "
+        f"windows from train={train_window}/test={test_window} to "
+        f"train={new_train}/test={new_test} to fit."
+    )
+    return {"train_window": new_train, "test_window": new_test}
+
+
+def walk_forward_predictions(
+    df: pd.DataFrame,
+    horizon: Horizon,
+    lookahead: int,
+    train_window: int,
+    test_window: int,
+    has_volume: bool = True,
+) -> pd.DataFrame:
+    """Builds features/labels from raw OHLCV, then runs the walk-forward
+    core loop. Window sizes here are used as given -- callers wanting
+    automatic shrinking on thin data should go through run_backtest_report.
+    """
+    feats = build_features(df, has_volume=has_volume)
+    labels = build_labels(df, lookahead).reindex(feats.index)
+    valid = labels.notna()
+    feats, labels = feats[valid], labels[valid].astype(int)
+    return _walk_forward_core(feats, labels, horizon, train_window, test_window)
 
 
 def score_predictions(pooled: pd.DataFrame) -> dict:
@@ -152,8 +205,19 @@ def run_backtest_report(
     confidence_threshold: float = 0.5,
     cost_per_trade: float = 0.0005,
 ) -> dict:
-    """One-call convenience wrapper used by main.py's --backtest flag."""
-    pooled = walk_forward_predictions(df, horizon, lookahead, train_window, test_window, has_volume)
+    """One-call convenience wrapper used by main.py's --backtest flag.
+    Resolves train/test window sizes against the data actually available
+    (shrinking them if needed -- see resolve_windows) rather than assuming
+    the configured defaults always fit.
+    """
+    feats = build_features(df, has_volume=has_volume)
+    labels = build_labels(df, lookahead).reindex(feats.index)
+    valid = labels.notna()
+    feats, labels = feats[valid], labels[valid].astype(int)
+
+    windows = resolve_windows(len(feats), horizon, {"train_window": train_window, "test_window": test_window})
+    pooled = _walk_forward_core(feats, labels, horizon, windows["train_window"], windows["test_window"])
+
     scores = score_predictions(pooled)
     calib = calibration_table(pooled)
     equity = simulate_equity_curve(pooled, df, lookahead, confidence_threshold, cost_per_trade)

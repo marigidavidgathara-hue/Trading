@@ -26,6 +26,25 @@ logger = logging.getLogger(__name__)
 
 OHLCV_COLUMNS = ["open", "high", "low", "close", "volume"]
 
+# Our timeframe strings follow ccxt/yfinance convention ("1m", "5m", "1h",
+# "1d"). pandas resample() uses different aliases -- bare "m" means
+# month-end there, not minute -- so this maps the small set we use to the
+# warning-free pandas equivalents. Only ScreenCaptureDataFeed needs this;
+# ccxt/yfinance take the original strings directly.
+_PANDAS_FREQ = {
+    "1m": "1min", "5m": "5min", "15m": "15min", "30m": "30min",
+    "1h": "1h", "4h": "4h", "1d": "1D",
+}
+
+
+def _to_pandas_freq(timeframe: str) -> str:
+    if timeframe not in _PANDAS_FREQ:
+        raise ValueError(
+            f"Unsupported timeframe for the screen-capture feed's resampling: {timeframe!r}. "
+            f"Supported: {list(_PANDAS_FREQ)}"
+        )
+    return _PANDAS_FREQ[timeframe]
+
 
 class DataFeed(abc.ABC):
     """Common interface every data source backend implements."""
@@ -95,9 +114,38 @@ class APIDataFeed(DataFeed):
         import yfinance as yf
         interval = self._yf_interval(timeframe)
         period = self._yf_period_for(interval, limit)
-        df = yf.download(symbol, period=period, interval=interval, progress=False, auto_adjust=False)
-        if df.empty:
-            raise RuntimeError(f"yfinance returned no data for {symbol} ({interval}, {period})")
+
+        # Yahoo's free endpoint is well-documented to rate-limit rapid
+        # repeated requests, and surfaces that as a generic "possibly
+        # delisted; no price data found" rather than a clear rate-limit
+        # error -- even for a symbol that just worked seconds earlier
+        # (e.g. backtest succeeding, then train failing on the identical
+        # call right after). Retrying with backoff is the standard fix for
+        # this specific, well-known failure mode, not a real data problem.
+        last_error = None
+        df = None
+        max_attempts = 4
+        for attempt in range(max_attempts):
+            if attempt > 0:
+                time.sleep(3 * attempt)  # 3s, 6s, 9s backoff between retries
+            try:
+                df = yf.download(symbol, period=period, interval=interval, progress=False, auto_adjust=False)
+            except Exception as e:
+                last_error = e
+                df = None
+                continue
+            if not df.empty:
+                break
+            last_error = RuntimeError(f"yfinance returned no data for {symbol} ({interval}, {period})")
+            df = None
+
+        if df is None or df.empty:
+            raise RuntimeError(
+                f"yfinance returned no data for {symbol} ({interval}, {period}) "
+                f"after {max_attempts} attempts with backoff. This is usually "
+                f"Yahoo Finance rate-limiting the free endpoint rather than a bad "
+                f"symbol -- it often succeeds again after waiting a bit longer."
+            ) from last_error
         if isinstance(df.columns, pd.MultiIndex):
             df.columns = df.columns.get_level_values(0)
         df = df.rename(columns=str.lower)[OHLCV_COLUMNS]
@@ -167,7 +215,7 @@ class ScreenCaptureDataFeed(DataFeed):
                 "(e.g. via the live loop in main.py) before requesting OHLCV bars."
             )
         df = pd.DataFrame(self._history).set_index("ts")
-        ohlc = df["price"].resample(timeframe).ohlc()
+        ohlc = df["price"].resample(_to_pandas_freq(timeframe)).ohlc()
         ohlc["volume"] = float("nan")  # not observable from a screenshot
         return ohlc.dropna(subset=["open"]).tail(limit)
 

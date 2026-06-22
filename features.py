@@ -78,8 +78,19 @@ def build_features(df: pd.DataFrame, has_volume: bool = True) -> pd.DataFrame:
     out["realized_vol_10"] = out["log_ret_1"].rolling(10).std()
     out["realized_vol_30"] = out["log_ret_1"].rolling(30).std()
 
-    # --- volume (skipped entirely for screen feeds -- not observable) -----
-    if has_volume and df["volume"].notna().any():
+    # --- volume -------------------------------------------------------------
+    # Don't just trust the has_volume hint -- forex via yfinance reports
+    # volume as exactly 0 on every bar (OTC market, no centralized tape), and
+    # any ratio/pct_change against an all-zero series produces inf/NaN on
+    # every row, which dropna() at the end would then turn into "no rows at
+    # all". Require at least one genuinely nonzero reading before trusting it.
+    volume_usable = (
+        has_volume
+        and "volume" in df
+        and df["volume"].notna().any()
+        and df["volume"].fillna(0).ne(0).any()
+    )
+    if volume_usable:
         vol = df["volume"]
         out["vol_chg_1"] = vol.pct_change(1)
         out["vol_sma_ratio"] = vol / vol.rolling(20).mean() - 1
@@ -87,6 +98,16 @@ def build_features(df: pd.DataFrame, has_volume: bool = True) -> pd.DataFrame:
         out["obv_chg"] = out["obv"].pct_change(5)
         out["mfi_14"] = ta.volume.MFIIndicator(high, low, close, vol, window=14).money_flow_index()
 
+    # Any ratio/pct_change above can produce +/-inf when its denominator
+    # hits exactly zero (e.g. a zero-volume bar in vol_chg_1, or OBV
+    # crossing zero in obv_chg) -- this is a real occurrence with real
+    # futures/forex data, not just an edge case. dropna() does NOT remove
+    # inf, only NaN, so an infinite value would otherwise survive straight
+    # into the matrix sklearn's scaler validates. An infinite ratio is
+    # undefined, i.e. missing information for that row -- converting it to
+    # NaN here makes dropna() treat it the same way it already treats
+    # every other kind of missing feature value.
+    out = out.replace([np.inf, -np.inf], np.nan)
     return out.dropna()
 
 
