@@ -1,0 +1,20 @@
+pandas
+numpy
+scikit-learn
+lightgbm
+ta
+ccxt
+yfinance
+mss
+opencv-python-headless
+pytesseract
+Pillow
+
+# Tesseract OCR binary is required separately (not a pip package):
+#   Windows: https://github.com/UB-Mannheim/tesseract/wiki  (installer)
+#   macOS:   brew install tesseract
+#   Linux:   sudo apt-get install tesseract-ocr
+# After installing on Windows, you may need to point pytesseract at it, e.g.
+# in screen_vision.py:
+#   import pytesseract
+#   pytesseract.pytesseract.tesseract_cmd = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
